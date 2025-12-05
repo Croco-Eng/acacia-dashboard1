@@ -106,7 +106,7 @@ if not st.session_state["is_admin"]:
 else:
     # Mode admin : on n'affiche PAS le champ mot de passe,
     # seulement un bouton de déconnexion
-    if st.sidebar.button("Se déconnecter (revenir en mode public)"):
+    if st.sidebar.button("Se déconnecter"):
         st.session_state["is_admin"] = False
         st.sidebar.info("Mode public activé")
         st.rerun()  # ✅ API stable
@@ -475,3 +475,4 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
