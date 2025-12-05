@@ -36,24 +36,82 @@ PROGRESS_MAP = {
 }
 
 
-# -----------------------------------
-# Contrôle d'accès : mode admin / public
-# -----------------------------------
+
+import os
+import streamlit as st
+
+# -------------------------------
+# Helper: récupérer le secret admin
+# -------------------------------
+def _get_admin_secret() -> str:
+    # 1) variable d'environnement (simple en local)
+    env_val = os.getenv("ADMIN_PASSWORD")
+    if env_val:
+        return env_val
+    # 2) secrets (Cloud ou secrets.toml)
+    try:
+        return str(st.secrets["ADMIN_PASSWORD"])
+    except Exception:
+        return ""  # aucun secret → mode public par défaut
+
+DEBUG_PASSWORD_HINTS = os.getenv("DEBUG_PASSWORD_HINTS", "false").lower() == "true"
+
+# -------------------------------
+# État et bandeau d'accès
+# -------------------------------
 st.sidebar.header("🔒 Accès")
 if "is_admin" not in st.session_state:
     st.session_state["is_admin"] = False
 
-# Mot de passe depuis secrets (Cloud) ou variable d'environnement (local)
-_admin_secret = st.secrets.get("ADMIN_PASSWORD", os.getenv("ADMIN_PASSWORD", ""))
+_admin_secret = _get_admin_secret()
+st.sidebar.caption(f"Mode actuel : {'Admin ✅' if st.session_state['is_admin'] else 'Public'}")
 
+# -------------------------------
+# Rendu conditionnel :
+# - mode public → formulaire (avec bouton de validation)
+# - mode admin  → bouton de déconnexion seulement
+# -------------------------------
 if not st.session_state["is_admin"]:
-    pwd_try = st.sidebar.text_input("Mot de passe admin", type="password", help="Laisser vide si vous êtes simple utilisateur")
-    if _admin_secret and pwd_try == _admin_secret:
-        st.session_state["is_admin"] = True
-        st.sidebar.success("Mode admin activé ✅")
-    else:
-        st.sidebar.info("Mode public : seuls KPI & Graphiques sont visibles.")
+    if not _admin_secret:
+        st.sidebar.warning(
+            "Aucun mot de passe admin n’est configuré.\n"
+            "→ Local : ADMIN_PASSWORD (env var) ou .streamlit/secrets.toml\n"
+            "→ Cloud : Settings → Secrets → ADMIN_PASSWORD"
+        )
 
+    with st.sidebar.form(key="admin_form", clear_on_submit=False):
+        pwd_try = st.text_input(
+            "Mot de passe admin",
+            type="password",
+            help="Astuce : vérifie majuscules/minuscules et les espaces.",
+            placeholder="Saisir le mot de passe"
+        )
+        activate = st.form_submit_button("Activer le mode admin")
+
+    if activate:
+        entered = (pwd_try or "").strip()
+        expected = _admin_secret.strip()
+        if expected and entered == expected:
+            st.session_state["is_admin"] = True
+            st.sidebar.success("Mode admin activé ✅")
+            st.rerun()  # ✅ API stable
+        else:
+            st.session_state["is_admin"] = False
+            if not _admin_secret:
+                st.sidebar.error("Mot de passe incorrect ❌ — aucun secret ADMIN_PASSWORD n’est configuré.")
+            else:
+                st.sidebar.error("Mot de passe incorrect ❌ — vérifie la casse et les espaces.")
+                if DEBUG_PASSWORD_HINTS:
+                    st.sidebar.info(f"Indice (non sensible) : longueur saisie = {len(entered)} caractères.")
+else:
+    # Mode admin : on n'affiche PAS le champ mot de passe,
+    # seulement un bouton de déconnexion
+    if st.sidebar.button("Se déconnecter (revenir en mode public)"):
+        st.session_state["is_admin"] = False
+        st.sidebar.info("Mode public activé")
+        st.rerun()  # ✅ API stable
+
+# Flag unique pour la suite
 is_admin = st.session_state["is_admin"]
 
 
