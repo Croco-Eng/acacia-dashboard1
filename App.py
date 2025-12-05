@@ -521,62 +521,62 @@ with tab_graph:
 # -------------------------------------------------
 # 📤 3.4 Export
 # -------------------------------------------------
-if is_admin:
+if is_admin:    
+    with tab_export:
+        st.subheader("Exporter le fichier modifié (Google Drive)")
+        service = get_drive_service()
+        folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
+        ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
     
-with tab_export:
-    st.subheader("Exporter le fichier modifié (Google Drive)")
-    service = get_drive_service()
-    folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
-    ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+        if not service or not folder_id:
+            st.error("⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                # ÉCRASER le fichier de référence (ref_name) dans le dossier
+                if st.button("💾 Sauvegarder sur Drive (écraser la référence)", type="primary"):
+                    try:
+                        # 1) Excel en mémoire depuis df
+                        buf_ref = BytesIO()
+                        with pd.ExcelWriter(buf_ref, engine="openpyxl") as w:
+                            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
+                        buf_ref.seek(0)
+    
+                        # 2) Trouver le fichier existant par nom
+                        found = drive_find_file(service, folder_id, ref_name)
+                        file_id = found["id"] if found else None
+    
+                        # 3) Upload (update si existe, sinon create)
+                        new_id = drive_upload_excel(service, folder_id, ref_name, buf_ref.read(), file_id=file_id)
+    
+                        st.success(f"✅ Référence mise à jour sur Drive (fileId={new_id}).")
+                    except Exception as e:
+                        st.error(f"❌ Échec de la sauvegarde Drive : {e}")
+    
+            with c2:
+                # CRÉER un BACKUP horodaté dans le même dossier (nouveau fichier)
+                backup_name = f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                if st.button("⬆️ Créer un backup horodaté sur Drive"):
+                    try:
+                        buf_bak = BytesIO()
+                        with pd.ExcelWriter(buf_bak, engine="openpyxl") as w:
+                            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
+                        buf_bak.seek(0)
+    
+                        bak_id = drive_upload_excel(service, folder_id, backup_name, buf_bak.read(), file_id=None)
+                        st.success(f"✅ Backup créé sur Drive : {backup_name} (fileId={bak_id}).")
+                    except Exception as e:
+                        st.error(f"❌ Échec du backup Drive : {e}")
+    
+        # Bouton de téléchargement local (pour l'utilisateur)
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as w:
+            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
+        buffer.seek(0)
+        st.download_button(
+            label="⬇️ Télécharger (Excel modifié)",
+            data=buffer,
+            file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-    if not service or not folder_id:
-        st.error("⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            # ÉCRASER le fichier de référence (ref_name) dans le dossier
-            if st.button("💾 Sauvegarder sur Drive (écraser la référence)", type="primary"):
-                try:
-                    # 1) Excel en mémoire depuis df
-                    buf_ref = BytesIO()
-                    with pd.ExcelWriter(buf_ref, engine="openpyxl") as w:
-                        st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-                    buf_ref.seek(0)
-
-                    # 2) Trouver le fichier existant par nom
-                    found = drive_find_file(service, folder_id, ref_name)
-                    file_id = found["id"] if found else None
-
-                    # 3) Upload (update si existe, sinon create)
-                    new_id = drive_upload_excel(service, folder_id, ref_name, buf_ref.read(), file_id=file_id)
-
-                    st.success(f"✅ Référence mise à jour sur Drive (fileId={new_id}).")
-                except Exception as e:
-                    st.error(f"❌ Échec de la sauvegarde Drive : {e}")
-
-        with c2:
-            # CRÉER un BACKUP horodaté dans le même dossier (nouveau fichier)
-            backup_name = f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            if st.button("⬆️ Créer un backup horodaté sur Drive"):
-                try:
-                    buf_bak = BytesIO()
-                    with pd.ExcelWriter(buf_bak, engine="openpyxl") as w:
-                        st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-                    buf_bak.seek(0)
-
-                    bak_id = drive_upload_excel(service, folder_id, backup_name, buf_bak.read(), file_id=None)
-                    st.success(f"✅ Backup créé sur Drive : {backup_name} (fileId={bak_id}).")
-                except Exception as e:
-                    st.error(f"❌ Échec du backup Drive : {e}")
-
-    # Bouton de téléchargement local (pour l'utilisateur)
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as w:
-        st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-    buffer.seek(0)
-    st.download_button(
-        label="⬇️ Télécharger (Excel modifié)",
-        data=buffer,
-        file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
