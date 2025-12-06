@@ -1,4 +1,3 @@
-
 # app.py — Tableau de Bord Suivi Fabrication (TOR, synchronisation, filtres, couleurs)
 # Exécuter : streamlit run App.py
 import streamlit as st
@@ -9,11 +8,9 @@ from io import BytesIO
 from datetime import datetime
 import os
 
-
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
-
 
 # -------------------------------------------------
 # 0) Configuration & thème
@@ -24,7 +21,7 @@ st.title("📊 Tableau de Bord — Suivi Fabrication Structure Métallique")
 # Couleurs par Étape (pour cohérence visuelle)
 STEP_COLORS = {
     "Préparation": "#1f77b4",  # bleu
-    "Assemblage": "#ff7f0e",   # orange
+    "Assemblage": "#ff7f0e",  # orange
     "Traitement de surface": "#2ca02c",  # vert
     "Finalisation": "#d62728",  # rouge
     "None": "#7f7f7f"
@@ -45,12 +42,14 @@ PROGRESS_MAP = {
 # -----------------------------
 # Google Drive: service & utils
 # -----------------------------
+@st.cache_resource
 def get_drive_service():
     """Construit le client Drive à partir des secrets Streamlit (service account)."""
     try:
         sa_info = dict(st.secrets["gdrive_service"])  # section TOML -> dict
     except Exception:
         return None  # pas de secrets -> pas de Drive
+
     scopes = ["https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
     return build("drive", "v3", credentials=creds)
@@ -62,6 +61,7 @@ def drive_find_file(service, folder_id: str, name: str):
     files = res.get("files", [])
     return files[0] if files else None
 
+
 def drive_download_excel(service, file_id: str) -> bytes:
     """Télécharge le contenu du fichier Drive (binaire) par file_id."""
     buf = BytesIO()
@@ -72,6 +72,7 @@ def drive_download_excel(service, file_id: str) -> bytes:
         status, done = downloader.next_chunk()
     buf.seek(0)
     return buf.read()
+
 
 def drive_upload_excel(service, folder_id: str, name: str, binary_data: bytes, file_id: str | None = None) -> str:
     """Crée ou écrase un fichier Excel dans Drive. Retourne le fileId."""
@@ -104,6 +105,7 @@ def _get_admin_secret() -> str:
         return str(st.secrets["ADMIN_PASSWORD"])
     except Exception:
         return ""  # aucun secret → mode public par défaut
+
 
 DEBUG_PASSWORD_HINTS = os.getenv("DEBUG_PASSWORD_HINTS", "false").lower() == "true"
 
@@ -165,7 +167,6 @@ else:
 # Flag unique pour la suite
 is_admin = st.session_state["is_admin"]
 
-
 # -------------------------------------------------
 # 1) Chargement des données
 # -------------------------------------------------
@@ -179,6 +180,7 @@ DEFAULT_XLSX = "Structural_data.xlsx"  # même dossier que l'application
 def load_excel(path_or_buffer):
     # lit la première feuille automatiquement (évite les erreurs de nom)
     return pd.read_excel(path_or_buffer, engine="openpyxl")
+
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Colonnes attendues dans le fichier
@@ -199,6 +201,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["CompletedMass_Row"] = 0.0
     return df
 
+
 # Charger fichier du dossier ou via upload
 st.sidebar.header("🛠 Données")
 
@@ -207,13 +210,13 @@ if is_admin:
         "Importer un Excel (.xlsx)", type=["xlsx"],
         help="Optionnel : sinon 'Structural_data.xlsx' sera utilisé."
     )
-else: 
+else:
     uploaded = None  # pas d'upload en mode public
 
 # --- Lecture prioritaire depuis Drive ; upload admin possible ; sinon fallback local ---
 service = get_drive_service()
 folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
-ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+ref_name = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
 
 try:
     if is_admin and uploaded is not None:
@@ -243,7 +246,6 @@ except Exception as e:
     st.error(f"❌ Échec de chargement : {e}")
     st.stop()
 
-
 df_loaded = ensure_columns(df_loaded)
 st.caption(f"✅ {source_label}")
 
@@ -259,6 +261,10 @@ elif st.session_state.get("source_key") != current_source_key:
 
 if "refresh_needed" not in st.session_state:
     st.session_state["refresh_needed"] = False
+
+if "dirty" not in st.session_state:
+    st.session_state["dirty"] = False
+
 
 # -------------------------------------------------
 # 2) Fonctions utilitaires (TOR & calculs)
@@ -285,6 +291,7 @@ def step_advancement(df: pd.DataFrame) -> pd.DataFrame:
         rows.append({"Etape": step, "CompletedMass": treated_mass, "Avancement%": pct})
     return pd.DataFrame(rows)
 
+
 @st.cache_data(show_spinner=False)
 def phase_advancement(df: pd.DataFrame) -> pd.DataFrame:
     """Avancement par PHASE."""
@@ -296,6 +303,7 @@ def phase_advancement(df: pd.DataFrame) -> pd.DataFrame:
         rows.append({"PHASE": phase, "CompletedMass": treated_mass, "Avancement%": pct})
     return pd.DataFrame(rows)
 
+
 @st.cache_data(show_spinner=False)
 def assembly_table(df: pd.DataFrame) -> pd.DataFrame:
     """Vue par assemblage."""
@@ -306,6 +314,7 @@ def assembly_table(df: pd.DataFrame) -> pd.DataFrame:
     inv_rank = {v: k for k, v in STEP_RANK.items()}
     agg["EtapeAsm"] = agg["EtapeRank"].map(inv_rank).fillna("None")
     return agg[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "EtapeAsm"]]
+
 
 # Première recomputation
 st.session_state["df"] = recompute_progress(st.session_state["df"])
@@ -328,7 +337,8 @@ if is_admin:
         phases = sorted(st.session_state["df"]["PHASE"].unique())
         ph_sel = st.multiselect("Filtrer par PHASE", options=phases, default=phases)
         search_asm = st.text_input("🔍 Rechercher Assemblage / Pièce (contient)", value="")
-    
+
+
         def filter_view(_df: pd.DataFrame) -> pd.DataFrame:
             _view = _df[_df["PHASE"].isin(ph_sel)]
             if search_asm.strip():
@@ -339,20 +349,44 @@ if is_admin:
                 )
                 _view = _view[mask]
             return _view
-    
+
+
         sub_tab_items, sub_tab_asm = st.tabs(["Tableau Normal", "Tableau par Assemblage"])
-    
+
         # --- Tableau Normal (pièces)
         with sub_tab_items:
             st.markdown("**Éditer l’étape par pièce** (triable, filtrable)")
             view_items = filter_view(st.session_state["df"])
             edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
             df_edit_items = view_items[edit_cols].copy()
+
+            def _apply_items_changes():
+                """Applique immédiatement les changements pièce → global, sans rerun."""
+                key_cols = ["ASSEMBLY NO.", "PART NO."]
+                edited = st.session_state["edit_items"]  # DataFrame renvoyé par data_editor
+
+                updated_map = (
+                    edited[key_cols + ["Etape"]]
+                    .drop_duplicates()
+                    .assign(Etape=lambda s: s["Etape"].fillna("None"))
+                )
+
+                base = st.session_state["df"].drop(columns=["Etape"])
+                st.session_state["df"] = (
+                    base.merge(updated_map, on=key_cols, how="left")
+                    .assign(Etape=lambda x: x["Etape"].fillna("None"))
+                )
+
+                st.session_state["df"] = recompute_progress(st.session_state["df"])
+                st.session_state["dirty"] = True
+                st.success("✅ Modifications (pièces) appliquées")
+
             updated_items = st.data_editor(
                 df_edit_items,
                 key="edit_items",
                 hide_index=True,
                 use_container_width=True,
+                on_change=_apply_items_changes,
                 column_config={
                     "PHASE": st.column_config.TextColumn("PHASE", disabled=True),
                     "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
@@ -361,26 +395,7 @@ if is_admin:
                     "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True)
                 }
             )
-            if st.button("🔄 Synchroniser (pièces)", key="sync_items_btn"):
-                key_cols = ["ASSEMBLY NO.", "PART NO."]
-                # updated_map = updated_items[key_cols + ["Etape"]].drop_duplicates()
-                updated_map = (
-                    updated_items[key_cols + ["Etape"]]
-                    .drop_duplicates()
-                    .assign(Etape=lambda s: s["Etape"].fillna("None"))
-                )
-    
-                base = st.session_state["df"].drop(columns=["Etape"])
-                st.session_state["df"] = (
-                    base.merge(updated_map, on=key_cols, how="left")
-                    .assign(Etape=lambda x: x["Etape"].fillna("None"))
-                )
-    
-                st.session_state["df"] = recompute_progress(st.session_state["df"])
-                st.success("✅ Synchronisation effectuée (pièces → global)")
-                st.session_state["refresh_needed"] = True
-                st.rerun()
-    
+
         # --- Tableau par Assemblage
         with sub_tab_asm:
             st.markdown("**Éditer l’étape par Assemblage** (écrase toutes les pièces — logique stricte)")
@@ -390,29 +405,34 @@ if is_admin:
                 pat = search_asm.strip().lower()
                 mask_asm = df_asm_view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
                 df_asm_view = df_asm_view[mask_asm]
-    
+
             df_asm_view = df_asm_view.rename(columns={"EtapeAsm": "Etape"})
             df_edit_asm = df_asm_view[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "Etape"]].copy()
+            def _apply_asm_changes():
+                """Applique immédiatement les changements assemblage → pièces, sans rerun."""
+                edited = st.session_state["edit_asm"]  # DataFrame renvoyé par data_editor
+                asm_step_map = edited[["ASSEMBLY NO.", "Etape"]].drop_duplicates()
+
+                for _, row in asm_step_map.iterrows():
+                    asm = row["ASSEMBLY NO."]
+                    step = row["Etape"]
+                    st.session_state["df"].loc[st.session_state["df"]["ASSEMBLY NO."] == asm, "Etape"] = step
+
+                st.session_state["df"] = recompute_progress(st.session_state["df"])
+                st.session_state["dirty"] = True
+                st.success("✅ Modifications (assemblages) appliquées")
             updated_asm = st.data_editor(
                 df_edit_asm,
                 key="edit_asm",
                 hide_index=True,
                 use_container_width=True,
+                on_change=_apply_asm_changes,
                 column_config={
                     "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
                     "AssemblyMass": st.column_config.NumberColumn("Masse Assemblage (Kg)", disabled=True)
                 }
             )
-            if st.button("🔄 Synchroniser (assemblage)", key="sync_asm_btn"):
-                asm_step_map = updated_asm[["ASSEMBLY NO.", "Etape"]].drop_duplicates()
-                for _, row in asm_step_map.iterrows():
-                    asm = row["ASSEMBLY NO."]
-                    step = row["Etape"]
-                    st.session_state["df"].loc[st.session_state["df"]["ASSEMBLY NO."] == asm, "Etape"] = step
-                st.session_state["df"] = recompute_progress(st.session_state["df"])
-                st.success("✅ Synchronisation effectuée (assemblage → pièces)")
-                st.session_state["refresh_needed"] = True
-                st.rerun()  # Force la réexécution de l'app avec les données mises à jour
+
             if st.button("🔄 Actualiser le tableau des assemblages", key="refresh_asm_btn"):
                 df_asm = assembly_table(st.session_state["df"])
                 df_asm_view = df_asm[df_asm["PHASE"].isin(ph_sel)].copy()
@@ -466,7 +486,8 @@ with tab_kpi:
         text="Avancement%",
         title="Avancement par Étape (%)"
     )
-    fig_bar_steps.update_traces(texttemplate="%{text:.2f}%", textposition="outside", marker_line_color="#333", marker_line_width=0.)
+    fig_bar_steps.update_traces(texttemplate="%{text:.2f}%", textposition="outside", marker_line_color="#333",
+                                marker_line_width=0.)
     fig_bar_steps.update_yaxes(title="%", range=[0, 100])
     st.plotly_chart(fig_bar_steps, use_container_width=True)
     st.divider()
@@ -521,15 +542,16 @@ with tab_graph:
 # -------------------------------------------------
 # 📤 3.4 Export
 # -------------------------------------------------
-if is_admin:    
+if is_admin:
     with tab_export:
         st.subheader("Exporter le fichier modifié (Google Drive)")
         service = get_drive_service()
         folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
-        ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
-    
+        ref_name = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+
         if not service or not folder_id:
-            st.error("⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
+            st.error(
+                "⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
         else:
             c1, c2 = st.columns(2)
             with c1:
@@ -541,18 +563,18 @@ if is_admin:
                         with pd.ExcelWriter(buf_ref, engine="openpyxl") as w:
                             st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
                         buf_ref.seek(0)
-    
+
                         # 2) Trouver le fichier existant par nom
                         found = drive_find_file(service, folder_id, ref_name)
                         file_id = found["id"] if found else None
-    
+
                         # 3) Upload (update si existe, sinon create)
                         new_id = drive_upload_excel(service, folder_id, ref_name, buf_ref.read(), file_id=file_id)
-    
+
                         st.success(f"✅ Référence mise à jour sur Drive (fileId={new_id}).")
                     except Exception as e:
                         st.error(f"❌ Échec de la sauvegarde Drive : {e}")
-    
+
             with c2:
                 # CRÉER un BACKUP horodaté dans le même dossier (nouveau fichier)
                 backup_name = f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -562,12 +584,12 @@ if is_admin:
                         with pd.ExcelWriter(buf_bak, engine="openpyxl") as w:
                             st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
                         buf_bak.seek(0)
-    
+
                         bak_id = drive_upload_excel(service, folder_id, backup_name, buf_bak.read(), file_id=None)
                         st.success(f"✅ Backup créé sur Drive : {backup_name} (fileId={bak_id}).")
                     except Exception as e:
                         st.error(f"❌ Échec du backup Drive : {e}")
-    
+
         # Bouton de téléchargement local (pour l'utilisateur)
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as w:
@@ -579,4 +601,3 @@ if is_admin:
             file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
