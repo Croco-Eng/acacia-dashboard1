@@ -7,6 +7,13 @@ import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime
 import os
+import openpyxl
+from openpyxl import load_workbook
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None  # fallback si non installé
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -39,6 +46,39 @@ PROGRESS_MAP = {
 }
 
 
+# --- PATCH: Auto-sauvegarde toutes les 5 minutes (sans feuille horodatée)
+if "autosave_last_ts" not in st.session_state:
+    st.session_state["autosave_last_ts"] = 0.0
+
+def _maybe_autosave():
+    """Sauvegarde silencieuse toutes les 5 minutes en mode admin (réécrit 'Données' uniquement)."""
+    if not is_admin:
+        return
+    service = get_drive_service()
+    folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
+    ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+    if not service or not folder_id:
+        return  # Drive non configuré
+    now = datetime.now().timestamp()
+    # Intervalle 5 minutes = 300s
+    if now - st.session_state["autosave_last_ts"] >= 300:
+        try:
+            update_excel_with_df(service, folder_id, ref_name, st.session_state["df"], add_timestamp_sheet=False)
+            st.session_state["autosave_last_ts"] = now
+            st.sidebar.success("💾 Auto-sauvegarde exécutée (5 min)")
+        except Exception as e:
+            st.sidebar.error(f"Auto-sauvegarde: {e}")
+
+# Déclencheur d'auto-refresh (coté front)
+if st_autorefresh is not None:
+    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_5min")  # ~5 min
+    _maybe_autosave()
+else:
+    st.sidebar.info("Installe 'streamlit-autorefresh' pour l’auto-sauvegarde (pip install streamlit-autorefresh).")
+    if is_admin and st.sidebar.button("💾 Sauvegarde silencieuse (fallback)"):
+        _maybe_autosave()
+
+
 # -----------------------------
 # Google Drive: service & utils
 # -----------------------------
@@ -55,11 +95,31 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 def drive_find_file(service, folder_id: str, name: str):
-    """Retourne (id,name) du fichier par nom dans un dossier, sinon None."""
+    drive_id = None
+    try:
+        meta = drive_get_meta(service, folder_id)
+        drive_id = meta.get("driveId")  # présent si le dossier est dans un Drive partagé
+    except Exception:
+        pass  # fallback My Drive
+
     q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
-    res = service.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=1).execute()
+    params = dict(
+        q=q,
+        spaces="drive",
+        fields="files(id,name)",
+        pageSize=1,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+    )
+    if drive_id:
+        params.update({"corpora": "drive", "driveId": drive_id})
+    else:
+        params.update({"corpora": "user"})
+
+    res = service.files().list(**params).execute()
     files = res.get("files", [])
     return files[0] if files else None
+
 
 
 def drive_download_excel(service, file_id: str) -> bytes:
@@ -84,12 +144,69 @@ def drive_upload_excel(service, folder_id: str, name: str, binary_data: bytes, f
     metadata = {"name": name, "parents": [folder_id]}
     if file_id:
         # Mise à jour (update)
-        file = service.files().update(fileId=file_id, media_body=media).execute()
+        file = service.files().update(
+            fileId=file_id, 
+            media_body=media,
+            supportsAllDrives=True
+        ).execute()
         return file["id"]
     else:
-        # Création (create)
-        file = service.files().create(body=metadata, media_body=media, fields="id").execute()
-        return file["id"]
+        raise RuntimeError("La création de nouveaux fichiers est désactivée.")
+
+def drive_get_meta(service, file_id: str):
+    return service.files().get(
+        fileId=file_id,
+        fields="id,name,driveId",
+        supportsAllDrives=True
+    ).execute()
+
+
+# --- PATCH: helper central pour mettre à jour le fichier existant
+def update_excel_with_df(service, folder_id: str, ref_name: str, df: pd.DataFrame, add_timestamp_sheet: bool = False) -> str:
+    """
+    Met à jour le fichier Excel existant sur Drive :
+    - Réécrit la feuille 'Données' avec df
+    - Optionnel : ajoute une feuille horodatée 'Sauvegarde_YYYYMMDD_HHMMSS'
+    Retourne fileId.
+    """
+    # 1) Retrouver le fichier de référence
+    found = drive_find_file(service, folder_id, ref_name)
+    if not found:
+        raise FileNotFoundError(f"Fichier de référence introuvable: {ref_name}")
+    file_id = found["id"]
+
+    # 2) Télécharger le binaire existant
+    raw = drive_download_excel(service, file_id)
+
+    # 3) Charger le classeur existant
+    wb = load_workbook(BytesIO(raw))
+
+    # 4) Supprimer 'Données' si elle existe (on va la recréer)
+    if "Données" in wb.sheetnames:
+        ws = wb["Données"]
+        wb.remove(ws)
+
+    # 5) Préparer le nom horodaté (si demandé)
+    ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if add_timestamp_sheet else None
+    if ts_name and ts_name in wb.sheetnames:
+        wb.remove(wb[ts_name])
+
+    # 6) Écrire les feuilles en préservant les autres
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as w:
+        w.book = wb
+        w.sheets = {ws.title: ws for ws in wb.worksheets}
+        # Réécriture de 'Données'
+        df.to_excel(w, index=False, sheet_name="Données")
+        # Ajout éventuel de la feuille horodatée
+        if ts_name:
+            df.to_excel(w, index=False, sheet_name=ts_name)
+
+    buffer.seek(0)
+
+    # 7) Mettre à jour le même fichier (files.update)
+    new_id = drive_upload_excel(service, folder_id, ref_name, buffer.read(), file_id=file_id)
+    return new_id
 
 
 # -------------------------------
@@ -565,61 +682,39 @@ with tab_graph:
 # -------------------------------------------------
 if is_admin:
     with tab_export:
-        st.subheader("Exporter le fichier modifié (Google Drive)")
+        st.subheader("Sauvegarde Drive — réécrit 'Données' et ajoute une feuille horodatée")
         service = get_drive_service()
         folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
-        ref_name = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+        ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
 
         if not service or not folder_id:
-            st.error(
-                "⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
+            st.error("⚠️ Drive non configuré. Ajoute les secrets [gdrive_service] + GDRIVE_FOLDER_ID + GDRIVE_FILE_NAME.")
         else:
-            c1, c2 = st.columns(2)
-            with c1:
-                # ÉCRASER le fichier de référence (ref_name) dans le dossier
-                if st.button("💾 Sauvegarder sur Drive (écraser la référence)", type="primary"):
-                    try:
-                        # 1) Excel en mémoire depuis df
-                        buf_ref = BytesIO()
-                        with pd.ExcelWriter(buf_ref, engine="openpyxl") as w:
-                            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-                        buf_ref.seek(0)
+            # --- BOUTON UNIQUE DE SAUVEGARDE ---
+            if st.button("💾 Sauvegarder sur Drive (écraser la référence) + feuille horodatée", type="primary"):
+                try:
+                    new_id = update_excel_with_df(
+                        service=service,
+                        folder_id=folder_id,
+                        ref_name=ref_name,
+                        df=st.session_state["df"],
+                        add_timestamp_sheet=True  # crée une nouvelle feuille horodatée à chaque sauvegarde
+                    )
+                    st.success(f"✅ Fichier mis à jour (fileId={new_id}). 'Données' réécrite + feuille horodatée ajoutée.")
+                except Exception as e:
+                    st.error(f"❌ Échec de la sauvegarde Drive : {e}")
 
-                        # 2) Trouver le fichier existant par nom
-                        found = drive_find_file(service, folder_id, ref_name)
-                        file_id = found["id"] if found else None
+            # --- Téléchargement local (optionnel ; inchangé) ---
+            buffer = BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as w:
+                st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
+            buffer.seek(0)
+            st.download_button(
+                label="⬇️ Télécharger (Excel modifié)",
+                data=buffer,
+                file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-                        # 3) Upload (update si existe, sinon create)
-                        new_id = drive_upload_excel(service, folder_id, ref_name, buf_ref.read(), file_id=file_id)
 
-                        st.success(f"✅ Référence mise à jour sur Drive (fileId={new_id}).")
-                    except Exception as e:
-                        st.error(f"❌ Échec de la sauvegarde Drive : {e}")
-
-            with c2:
-                # CRÉER un BACKUP horodaté dans le même dossier (nouveau fichier)
-                backup_name = f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                if st.button("⬆️ Créer un backup horodaté sur Drive"):
-                    try:
-                        buf_bak = BytesIO()
-                        with pd.ExcelWriter(buf_bak, engine="openpyxl") as w:
-                            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-                        buf_bak.seek(0)
-
-                        bak_id = drive_upload_excel(service, folder_id, backup_name, buf_bak.read(), file_id=None)
-                        st.success(f"✅ Backup créé sur Drive : {backup_name} (fileId={bak_id}).")
-                    except Exception as e:
-                        st.error(f"❌ Échec du backup Drive : {e}")
-
-        # Bouton de téléchargement local (pour l'utilisateur)
-        buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as w:
-            st.session_state["df"].to_excel(w, index=False, sheet_name="Données")
-        buffer.seek(0)
-        st.download_button(
-            label="⬇️ Télécharger (Excel modifié)",
-            data=buffer,
-            file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
 
