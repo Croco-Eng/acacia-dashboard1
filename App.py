@@ -45,40 +45,6 @@ PROGRESS_MAP = {
     "None": 0.00
 }
 
-
-# --- PATCH: Auto-sauvegarde toutes les 5 minutes (sans feuille horodatée)
-if "autosave_last_ts" not in st.session_state:
-    st.session_state["autosave_last_ts"] = 0.0
-
-def _maybe_autosave():
-    """Sauvegarde silencieuse toutes les 5 minutes en mode admin (réécrit 'Données' uniquement)."""
-    if not is_admin:
-        return
-    service = get_drive_service()
-    folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
-    ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
-    if not service or not folder_id:
-        return  # Drive non configuré
-    now = datetime.now().timestamp()
-    # Intervalle 5 minutes = 300s
-    if now - st.session_state["autosave_last_ts"] >= 300:
-        try:
-            update_excel_with_df(service, folder_id, ref_name, st.session_state["df"], add_timestamp_sheet=False)
-            st.session_state["autosave_last_ts"] = now
-            st.sidebar.success("💾 Auto-sauvegarde exécutée (5 min)")
-        except Exception as e:
-            st.sidebar.error(f"Auto-sauvegarde: {e}")
-
-# Déclencheur d'auto-refresh (coté front)
-if st_autorefresh is not None:
-    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_5min")  # ~5 min
-    _maybe_autosave()
-else:
-    st.sidebar.info("Installe 'streamlit-autorefresh' pour l’auto-sauvegarde (pip install streamlit-autorefresh).")
-    if is_admin and st.sidebar.button("💾 Sauvegarde silencieuse (fallback)"):
-        _maybe_autosave()
-
-
 # -----------------------------
 # Google Drive: service & utils
 # -----------------------------
@@ -120,8 +86,6 @@ def drive_find_file(service, folder_id: str, name: str):
     files = res.get("files", [])
     return files[0] if files else None
 
-
-
 def drive_download_excel(service, file_id: str) -> bytes:
     """Télécharge le contenu du fichier Drive (binaire) par file_id."""
     buf = BytesIO()
@@ -133,33 +97,23 @@ def drive_download_excel(service, file_id: str) -> bytes:
     buf.seek(0)
     return buf.read()
 
-
 def drive_upload_excel(service, folder_id: str, name: str, binary_data: bytes, file_id: str | None = None) -> str:
-    """Crée ou écrase un fichier Excel dans Drive. Retourne le fileId."""
+    """Met à jour (files.update) un Excel existant sur Drive. Ne crée PAS de nouveau fichier. Retourne le fileId."""
     media = MediaIoBaseUpload(
         BytesIO(binary_data),
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         resumable=False
     )
-    metadata = {"name": name, "parents": [folder_id]}
     if file_id:
-        # Mise à jour (update)
         file = service.files().update(
-            fileId=file_id, 
+            fileId=file_id,
             media_body=media,
-            supportsAllDrives=True
+            supportsAllDrives=True  # requis pour les Drives partagés
         ).execute()
         return file["id"]
     else:
+        # Création interdite (conformément à la demande)
         raise RuntimeError("La création de nouveaux fichiers est désactivée.")
-
-def drive_get_meta(service, file_id: str):
-    return service.files().get(
-        fileId=file_id,
-        fields="id,name,driveId",
-        supportsAllDrives=True
-    ).execute()
-
 
 # --- PATCH: helper central pour mettre à jour le fichier existant
 def update_excel_with_df(service, folder_id: str, ref_name: str, df: pd.DataFrame, add_timestamp_sheet: bool = False) -> str:
@@ -283,6 +237,45 @@ else:
 
 # Flag unique pour la suite
 is_admin = st.session_state["is_admin"]
+
+
+# ---------- AUTO-SAUVEGARDE (5 min) ----------
+# Timestamp d'exécution (stocké en session)
+if "autosave_last_ts" not in st.session_state:
+    st.session_state["autosave_last_ts"] = 0.0
+
+def _maybe_autosave():
+    """Sauvegarde silencieuse toutes les 5 minutes en mode admin (réécrit 'Données' uniquement)."""
+    # ✅ On lit l'état depuis la session, pas de variable globale
+    is_admin_local = bool(st.session_state.get("is_admin", False))
+    if not is_admin_local:
+        return
+
+    service = get_drive_service()
+    folder_id = st.secrets.get("GDRIVE_FOLDER_ID", None)
+    ref_name  = st.secrets.get("GDRIVE_FILE_NAME", "Structural_data.xlsx")
+    if not service or not folder_id:
+        return  # Drive non configuré
+
+    now = datetime.now().timestamp()
+    # 5 minutes = 300s
+    if now - st.session_state["autosave_last_ts"] >= 300:
+        try:
+            update_excel_with_df(service, folder_id, ref_name, st.session_state["df"], add_timestamp_sheet=False)
+            st.session_state["autosave_last_ts"] = now
+            st.sidebar.success("💾 Auto-sauvegarde exécutée (5 min)")
+        except Exception as e:
+            st.sidebar.error(f"Auto-sauvegarde: {e}")
+
+# Déclencheur front (si le composant est installé)
+if st_autorefresh is not None:
+    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_5min")  # ~5 min
+    _maybe_autosave()
+else:
+    st.sidebar.info("Installe 'streamlit-autorefresh' (pip install streamlit-autorefresh) pour l’auto-sauvegarde.")
+    # Fallback manuel (optionnel)
+    if bool(st.session_state.get("is_admin", False)) and st.sidebar.button("💾 Sauvegarde silencieuse (fallback)"):
+        _maybe_autosave()
 
 # -------------------------------------------------
 # 1) Chargement des données
@@ -715,6 +708,7 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
 
 
