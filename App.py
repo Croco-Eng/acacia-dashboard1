@@ -360,26 +360,46 @@ if is_admin:
             edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
             df_edit_items = view_items[edit_cols].copy()
 
-            def _apply_items_changes():
-                """Applique immédiatement les changements pièce → global, sans rerun."""
-                key_cols = ["ASSEMBLY NO.", "PART NO."]
-                edited = st.session_state["edit_items"]  # DataFrame renvoyé par data_editor
 
+            def _apply_items_changes():
+                key_cols = ["ASSEMBLY NO.", "PART NO."]
+
+                # 1) Récupère la valeur du widget et normalise en DataFrame
+                raw_val = st.session_state.get("edit_items")
+                if isinstance(raw_val, pd.DataFrame):
+                    edited = raw_val.copy()
+                elif raw_val is None:
+                    st.info("Aucune ligne à appliquer pour l’instant.")
+                    return
+                else:
+                    # list[dict] ou dict -> DataFrame
+                    edited = pd.DataFrame(raw_val)
+
+                # 2) Vérifie/retient seulement les colonnes présentes
+                needed = [c for c in (key_cols + ["Etape"]) if c in edited.columns]
+                if "Etape" not in edited.columns or not needed:
+                    st.info("Aucune colonne 'Etape' détectée dans la vue courante.")
+                    return
+
+                # 3) Construit la table de mise à jour
                 updated_map = (
-                    edited[key_cols + ["Etape"]]
+                    edited[needed]
                     .drop_duplicates()
                     .assign(Etape=lambda s: s["Etape"].fillna("None"))
                 )
 
+                # 4) Injection dans le DF global (sans perdre d’autres colonnes)
                 base = st.session_state["df"].drop(columns=["Etape"])
                 st.session_state["df"] = (
                     base.merge(updated_map, on=key_cols, how="left")
                     .assign(Etape=lambda x: x["Etape"].fillna("None"))
                 )
 
+                # 5) Recalcul + flag de modification
                 st.session_state["df"] = recompute_progress(st.session_state["df"])
                 st.session_state["dirty"] = True
                 st.success("✅ Modifications (pièces) appliquées")
+
 
             updated_items = st.data_editor(
                 df_edit_items,
@@ -408,11 +428,27 @@ if is_admin:
 
             df_asm_view = df_asm_view.rename(columns={"EtapeAsm": "Etape"})
             df_edit_asm = df_asm_view[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "Etape"]].copy()
-            def _apply_asm_changes():
-                """Applique immédiatement les changements assemblage → pièces, sans rerun."""
-                edited = st.session_state["edit_asm"]  # DataFrame renvoyé par data_editor
-                asm_step_map = edited[["ASSEMBLY NO.", "Etape"]].drop_duplicates()
 
+
+            def _apply_asm_changes():
+                # 1) Récupère la valeur du widget et normalise en DataFrame
+                raw_val = st.session_state.get("edit_asm")
+                if isinstance(raw_val, pd.DataFrame):
+                    edited = raw_val.copy()
+                elif raw_val is None:
+                    st.info("Aucune ligne assemblage à appliquer.")
+                    return
+                else:
+                    edited = pd.DataFrame(raw_val)
+
+                # 2) Vérifie que les deux colonnes sont bien là
+                cols_needed = ["ASSEMBLY NO.", "Etape"]
+                if not all(c in edited.columns for c in cols_needed):
+                    st.info("Colonnes 'ASSEMBLY NO.' et 'Etape' requises pour appliquer les changements.")
+                    return
+
+                # 3) Applique l’étape à toutes les pièces de l’assemblage
+                asm_step_map = edited[cols_needed].drop_duplicates()
                 for _, row in asm_step_map.iterrows():
                     asm = row["ASSEMBLY NO."]
                     step = row["Etape"]
@@ -421,6 +457,8 @@ if is_admin:
                 st.session_state["df"] = recompute_progress(st.session_state["df"])
                 st.session_state["dirty"] = True
                 st.success("✅ Modifications (assemblages) appliquées")
+
+
             updated_asm = st.data_editor(
                 df_edit_asm,
                 key="edit_asm",
