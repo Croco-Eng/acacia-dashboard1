@@ -123,45 +123,60 @@ def update_excel_with_df(service, folder_id: str, ref_name: str, df: pd.DataFram
     - Optionnel : ajoute une feuille horodatée 'Sauvegarde_YYYYMMDD_HHMMSS'
     Retourne fileId.
     """
-    # 1) Retrouver le fichier de référence
+    # 1) Retrouver le fichier
     found = drive_find_file(service, folder_id, ref_name)
     if not found:
         raise FileNotFoundError(f"Fichier de référence introuvable: {ref_name}")
     file_id = found["id"]
 
-    # 2) Télécharger le binaire existant
+    # 2) Charger le classeur actuel
     raw = drive_download_excel(service, file_id)
-
-    # 3) Charger le classeur existant
     wb = load_workbook(BytesIO(raw))
 
-    # 4) Supprimer 'Données' si elle existe (on va la recréer)
-    if "Données" in wb.sheetnames:
-        ws = wb["Données"]
-        wb.remove(ws)
+    # 3) Décider si on supprime 'Données' ou si on la réécrit
+    has_donnees = ("Données" in wb.sheetnames)
+    only_one_sheet = (len(wb.sheetnames) == 1)
 
-    # 5) Préparer le nom horodaté (si demandé)
-    ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if add_timestamp_sheet else None
-    if ts_name and ts_name in wb.sheetnames:
-        wb.remove(wb[ts_name])
+    # ⚠️ Ne jamais supprimer la dernière feuille visible
+    remove_donnees = has_donnees and not only_one_sheet
+    if remove_donnees:
+        wb.remove(wb["Données"])
 
-    # 6) Écrire les feuilles en préservant les autres
+    # 4) Écrire les feuilles en préservant les autres
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as w:
         w.book = wb
         w.sheets = {ws.title: ws for ws in wb.worksheets}
+
+        # Si 'Données' était la seule feuille, on la conserve et on nettoie son contenu
+        if has_donnees and only_one_sheet:
+            ws = w.book["Données"]
+            # Nettoyage simple : supprimer toutes les lignes existantes
+            if ws.max_row > 0:
+                ws.delete_rows(1, ws.max_row)
+
         # Réécriture de 'Données'
         df.to_excel(w, index=False, sheet_name="Données")
-        # Ajout éventuel de la feuille horodatée
-        if ts_name:
+
+        # Ajout horodaté (optionnel)
+        if add_timestamp_sheet:
+            ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            while ts_name in w.book.sheetnames:  # rare, mais on protège le nom
+                ts_name += "_1"
             df.to_excel(w, index=False, sheet_name=ts_name)
+
+        # S'assurer qu'au moins une feuille est visible et active
+        w.book["Données"].sheet_state = "visible"
+        try:
+            w.book.active = w.book.sheetnames.index("Données")
+        except Exception:
+            w.book.active = 0  # fallback
 
     buffer.seek(0)
 
-    # 7) Mettre à jour le même fichier (files.update)
+    # 5) Mettre à jour le même fichier (files.update) — pas de création
     new_id = drive_upload_excel(service, folder_id, ref_name, buffer.read(), file_id=file_id)
     return new_id
-
 
 # -------------------------------
 # Helper: récupérer le secret admin
@@ -708,6 +723,7 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
 
 
