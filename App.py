@@ -338,7 +338,6 @@ if is_admin:
         ph_sel = st.multiselect("Filtrer par PHASE", options=phases, default=phases)
         search_asm = st.text_input("🔍 Rechercher Assemblage / Pièce (contient)", value="")
 
-
         def filter_view(_df: pd.DataFrame) -> pd.DataFrame:
             _view = _df[_df["PHASE"].isin(ph_sel)]
             if search_asm.strip():
@@ -350,7 +349,6 @@ if is_admin:
                 _view = _view[mask]
             return _view
 
-
         sub_tab_items, sub_tab_asm = st.tabs(["Tableau Normal", "Tableau par Assemblage"])
 
         # --- Tableau Normal (pièces)
@@ -360,8 +358,8 @@ if is_admin:
             edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
             df_edit_items = view_items[edit_cols].copy()
 
-
             def _apply_items_changes():
+                """Applique immédiatement les changements pièce → global, sans rerun."""
                 key_cols = ["ASSEMBLY NO.", "PART NO."]
 
                 # 1) Récupère la valeur du widget et normalise en DataFrame
@@ -400,7 +398,6 @@ if is_admin:
                 st.session_state["dirty"] = True
                 st.success("✅ Modifications (pièces) appliquées")
 
-
             updated_items = st.data_editor(
                 df_edit_items,
                 key="edit_items",
@@ -428,7 +425,6 @@ if is_admin:
 
             df_asm_view = df_asm_view.rename(columns={"EtapeAsm": "Etape"})
             df_edit_asm = df_asm_view[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "Etape"]].copy()
-
 
             def _apply_asm_changes():
                 # 1) Récupère la valeur du widget et normalise en DataFrame
@@ -639,3 +635,4 @@ if is_admin:
             file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
