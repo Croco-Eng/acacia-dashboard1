@@ -256,8 +256,9 @@ is_admin = st.session_state["is_admin"]
 
 # ---------- AUTO-SAUVEGARDE (5 min) ----------
 # Timestamp d'exécution (stocké en session)
+from datetime import datetime
 if "autosave_last_ts" not in st.session_state:
-    st.session_state["autosave_last_ts"] = 0.0
+    st.session_state["autosave_last_ts"] = datetime.now().timestamp()
 
 def _maybe_autosave():
     """Sauvegarde silencieuse toutes les 5 minutes en mode admin (réécrit 'Données' uniquement)."""
@@ -723,6 +724,7 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
 
 
