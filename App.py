@@ -195,7 +195,7 @@ def update_excel_with_df(service, folder_id: str, ref_name: str,
         ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         while ts_name in wb.sheetnames:
             ts_name += "_1"
-        ts_index = len(wb.sheetnames
+        ts_index = len(wb.sheetnames)
         ws_ts = wb.create_sheet(ts_name)
         for r in dataframe_to_rows(df, index=False, header=True):
             ws_ts.append(r)
@@ -742,7 +742,7 @@ if is_admin:
                 df_edit_items,
                 key="edit_items",
                 hide_index=True,
-                use_container_width=True,
+                width='stretch',
                 column_config={
                     "PHASE": st.column_config.TextColumn("PHASE", disabled=True, help="Phase d'appartenance"),
                     "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
@@ -840,7 +840,7 @@ with tab_kpi:
         }
     ))
 
-    st.plotly_chart(fig_gauge, use_container_width=True)
+    st.plotly_chart(fig_gauge, width='stretch')
     st.divider()
     st.subheader("Avancement par Étape (TOR)")
     df_steps = step_advancement(st.session_state["df"])
@@ -850,7 +850,7 @@ with tab_kpi:
             "CompletedMass": "Masse traitée (Kg)",
             "Avancement%": "Avancement (%)"
         }),
-        use_container_width=True
+        width='stretch'
     )
     fig_bar_steps = px.bar(
         df_steps,
@@ -863,7 +863,7 @@ with tab_kpi:
     fig_bar_steps.update_traces(texttemplate="%{text:.2f}%", textposition="outside", marker_line_color="#333",
                                 marker_line_width=0.)
     fig_bar_steps.update_yaxes(title="%", range=[0, 100])
-    st.plotly_chart(fig_bar_steps, use_container_width=True)
+    st.plotly_chart(fig_bar_steps, width='stretch')
     st.divider()
     st.subheader("Avancement par PHASE")
     df_phase = phase_advancement(st.session_state["df"])
@@ -873,7 +873,7 @@ with tab_kpi:
             "CompletedMass": "Masse traitée (Kg)",
             "Avancement%": "Avancement (%)"
         }),
-        use_container_width=True
+        width='stretch'
     )
     fig_bar_phase = px.bar(
         df_phase,
@@ -884,7 +884,7 @@ with tab_kpi:
     )
     fig_bar_phase.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
     fig_bar_phase.update_yaxes(title="%", range=[0, 100])
-    st.plotly_chart(fig_bar_phase, use_container_width=True)
+    st.plotly_chart(fig_bar_phase, width='stretch')
 
     #Répartition masse par PHASE (camembert)
     st.subheader("Répartition de la masse par PHASE")
@@ -893,7 +893,7 @@ with tab_kpi:
         df_phase_mass, names="PHASE", values="TOT MASS (Kg)",
         color="PHASE", title="Masse totale par PHASE",
     )
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.plotly_chart(fig_pie, width='stretch')
 
     #Top assemblages par masse (utile pour prioriser)
     st.subheader("Top 10 Assemblages par masse")
@@ -906,7 +906,7 @@ with tab_kpi:
         color="TOT MASS (Kg)"
     )
     fig_top_asm.update_layout(xaxis_title="ASSEMBLY NO.", yaxis_title="Masse (Kg)")
-    st.plotly_chart(fig_top_asm, use_container_width=True)
+    st.plotly_chart(fig_top_asm, width='stretch')
 
     #Heatmap PHASE × Étape(masse)
     st.subheader("Heatmap — Masse par PHASE × Étape")
@@ -920,7 +920,7 @@ with tab_kpi:
         color_continuous_scale="Blues",
         aspect="auto",
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, width='stretch')
 
 # -------------------------------------------------
 # 📊 3.3 Graphiques
@@ -947,7 +947,7 @@ with tab_graph:
         yaxis2=dict(title="Masse (Kg)", overlaying="y", side="right"),
         legend=dict(orientation="h")
     )
-    st.plotly_chart(fig_s, use_container_width=True)
+    st.plotly_chart(fig_s, width='stretch')
 
 # -------------------------------------------------
 # 📤 3.4 Export
