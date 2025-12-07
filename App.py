@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 from io import BytesIO
 from datetime import datetime
 import os
-import openpyxl
 from openpyxl import load_workbook
 
 try:
@@ -429,18 +428,6 @@ def phase_advancement(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@st.cache_data(show_spinner=False)
-def assembly_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Vue par assemblage."""
-    agg = df.groupby(["PHASE", "ASSEMBLY NO."]).agg(
-        AssemblyMass=("TOT MASS (Kg)", "sum"),
-        EtapeRank=("Etape", lambda s: min([STEP_RANK.get(x, -1) for x in s]) if len(s) else -1)
-    ).reset_index()
-    inv_rank = {v: k for k, v in STEP_RANK.items()}
-    agg["EtapeAsm"] = agg["EtapeRank"].map(inv_rank).fillna("None")
-    return agg[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "EtapeAsm"]]
-
-
 # Première recomputation
 st.session_state["df"] = recompute_progress(st.session_state["df"])
 
@@ -456,133 +443,84 @@ else:
 # -------------------------------------------------
 # ✏️ 3.1 Édition
 # -------------------------------------------------
+
 if is_admin:
     with tab_edit:
-        st.subheader("Mise à jour des Étapes (TOR) — synchronisée")
+        st.subheader("Mise à jour des Étapes (TOR) — par pièce")
+
         phases = sorted(st.session_state["df"]["PHASE"].unique())
         ph_sel = st.multiselect("Filtrer par PHASE", options=phases, default=phases)
+
         search_asm = st.text_input("🔍 Rechercher Assemblage / Pièce (contient)", value="")
 
+        # ---- Filtrage (corrigé, voir section B.1 ci-dessous) ----
         def filter_view(_df: pd.DataFrame) -> pd.DataFrame:
             _view = _df[_df["PHASE"].isin(ph_sel)]
             if search_asm.strip():
                 pat = search_asm.strip().lower()
                 mask = (
-                        _view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
-                        | _view["PART NO."].astype(str).str.lower().str.contains(pat, na=False)
+                    _view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
+                    |  # <- OR logique corrigé
+                    _view["PART NO."].astype(str).str.lower().str.contains(pat, na=False)
                 )
                 _view = _view[mask]
             return _view
 
-        sub_tab_items, sub_tab_asm = st.tabs(["Tableau Normal", "Tableau par Assemblage"])
+        st.markdown("**Éditer l’étape par pièce** (application automatique)")
 
-        # --- Tableau Normal (pièces)
-        with sub_tab_items:
-            st.markdown("**Éditer l’étape par pièce** (appliquée automatiquement)")
-            view_items = filter_view(st.session_state["df"])
-            edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
-            df_edit_items = view_items[edit_cols].copy()
+        view_items = filter_view(st.session_state["df"])
+        edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
+        df_edit_items = view_items[edit_cols].copy()
 
-            updated_items = st.data_editor(
-                df_edit_items,
-                key="edit_items",
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "PHASE": st.column_config.TextColumn("PHASE", disabled=True),
-                    "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
-                    "PART NO.": st.column_config.TextColumn("PART NO.", disabled=True),
-                    "TOT MASS (Kg)": st.column_config.NumberColumn("TOT MASS (Kg)", disabled=True),
-                    "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
-                },
-            )
+        updated_items = st.data_editor(
+            df_edit_items,
+            key="edit_items",
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "PHASE": st.column_config.TextColumn("PHASE", disabled=True),
+                "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
+                "PART NO.": st.column_config.TextColumn("PART NO.", disabled=True),
+                "TOT MASS (Kg)": st.column_config.NumberColumn("TOT MASS (Kg)", disabled=True),
+                "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
+            },
+        )
 
-            # >>> APPLICATION IMMÉDIATE (Pièces) — sans bouton, sans callback
-            try:
-                key_cols = ["ASSEMBLY NO.", "PART NO."]
-                needed = key_cols + ["Etape"]
+        # ---- Application immédiate (corrigée, voir section B.2) ----
+        try:
+            key_cols = ["ASSEMBLY NO.", "PART NO."]
+            needed = key_cols + ["Etape"]
+            if all(c in updated_items.columns for c in needed):
+                updated_map = (
+                    updated_items[needed]
+                    .drop_duplicates()
+                    .assign(Etape=lambda s: s["Etape"].fillna("None"))
+                )
 
-                if all(c in updated_items.columns for c in needed):
-                    updated_map = (
-                        updated_items[needed]
-                        .drop_duplicates()
-                        .assign(Etape=lambda s: s["Etape"].fillna("None"))
-                    )
+                df_base = st.session_state["df"].copy()
+                merged = df_base.merge(updated_map, on=key_cols, how="left", suffixes=("", "_new"))
+                merged["Etape"] = merged["Etape_new"].combine_first(merged["Etape"]).fillna("None")
+                merged = merged.drop(columns=["Etape_new"])
 
-                    base = st.session_state["df"].drop(columns=["Etape"])
-                    st.session_state["df"] = (
-                        base.merge(updated_map, on=key_cols, how="left")
-                        .assign(Etape=lambda x: x["Etape"].fillna("None"))
-                    )
+                # Anti-régression (optionnel) appliqué juste après — voir B.3
+                if st.session_state.get("anti_reg", True):
+                    merged = enforce_monotonic_tor(merged)  # défini en B.3
 
-                    st.session_state["df"] = recompute_progress(st.session_state["df"])
-                    st.session_state["dirty"] = True
+                st.session_state["df"] = recompute_progress(merged)
+                st.session_state["dirty"] = True
 
-                    # (Optionnel) Invalider caches KPIs/Graph (si visuel ne se met pas à jour)
-                    try:
-                        step_advancement.clear()
-                        phase_advancement.clear()
-                    except Exception:
-                        pass
+                # Invalidation de caches nécessaires
+                try:
+                    step_advancement.clear()
+                    phase_advancement.clear()
+                except Exception:
+                    pass
 
-                    st.success("✅ Modifications (pièces) appliquées")
-                else:
-                    st.info("ℹ️ Colonnes requises absentes (ASSEMBLY NO., PART NO., Etape) dans l’éditeur.")
-            except Exception as e:
-                st.error(f"❌ Erreur pendant l’application des modifications (pièces) : {e}")
-
-        # --- Tableau par Assemblage
-        with sub_tab_asm:
-            st.markdown("**Éditer l’étape par Assemblage** (appliquée automatiquement)")
-            df_asm = assembly_table(st.session_state["df"])
-            df_asm_view = df_asm[df_asm["PHASE"].isin(ph_sel)].copy()
-            if search_asm.strip():
-                pat = search_asm.strip().lower()
-                mask_asm = df_asm_view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
-                df_asm_view = df_asm_view[mask_asm]
-
-            df_asm_view = df_asm_view.rename(columns={"EtapeAsm": "Etape"})
-            df_edit_asm = df_asm_view[["PHASE", "ASSEMBLY NO.", "AssemblyMass", "Etape"]].copy()
-
-            updated_asm = st.data_editor(
-                df_edit_asm,
-                key="edit_asm",
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
-                    "AssemblyMass": st.column_config.NumberColumn("Masse Assemblage (Kg)", disabled=True),
-                },
-            )
-
-            # >>> APPLICATION IMMÉDIATE (Assemblages) — sans bouton, sans callback
-            try:
-                cols_needed = ["ASSEMBLY NO.", "Etape"]
-                if all(c in updated_asm.columns for c in cols_needed):
-                    asm_step_map = updated_asm[cols_needed].drop_duplicates()
-
-                    for _, row in asm_step_map.iterrows():
-                        asm = row["ASSEMBLY NO."]
-                        step = row["Etape"]
-                        st.session_state["df"].loc[
-                            st.session_state["df"]["ASSEMBLY NO."] == asm, "Etape"
-                        ] = step
-
-                    st.session_state["df"] = recompute_progress(st.session_state["df"])
-                    st.session_state["dirty"] = True
-
-                    # (Optionnel) Invalider caches KPIs/Graph
-                    try:
-                        step_advancement.clear()
-                        phase_advancement.clear()
-                    except Exception:
-                        pass
-
-                    st.success("✅ Modifications (assemblages) appliquées")
-                else:
-                    st.info("ℹ️ Colonnes requises absentes (ASSEMBLY NO., Etape) dans l’éditeur.")
-            except Exception as e:
-                st.error(f"❌ Erreur pendant l’application des modifications (assemblages) : {e}")
+                st.success("✅ Modifications (pièces) appliquées")
+            else:
+                st.info("ℹ️ Colonnes requises absentes (ASSEMBLY NO., PART NO., Etape) dans l’éditeur.")
+        except Exception as e:
+            st.error(f"❌ Erreur pendant l’application des modifications (pièces) : {e}")
 
 # -------------------------------------------------
 # 📈 3.2 KPI
@@ -723,10 +661,3 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-
-
-
-
-
-
