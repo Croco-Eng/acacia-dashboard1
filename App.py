@@ -33,6 +33,23 @@ STEP_COLORS = {
     "None": "#7f7f7f"
 }
 
+# --- Thème NeoMeca (personnalisable) ---
+NEOMECA_PALETTE = {
+    "primary":   "#0D47A1",  # bleu foncé
+    "accent":    "#FF6F00",  # orange
+    "success":   "#2E7D32",  # vert
+    "warning":   "#FFB300",  # jaune
+    "danger":    "#D32F2F",  # rouge
+    "neutral":   "#37474F",  # gris
+}
+
+# (Option) Amélioration perf légère : catégories
+DTYPE_CONFIG = {
+    "PHASE": "category",
+    "Etape": "category",
+    "PROFILE": "category",
+}
+
 # Étapes et pondérations (pour RowProgress% global)
 STEPS_ORDER = ["Préparation", "Assemblage", "Traitement de surface", "Finalisation"]
 STEP_RANK = {s: i for i, s in enumerate(STEPS_ORDER)}  # ordre pour logique TOR
@@ -58,6 +75,17 @@ def get_drive_service():
     scopes = ["https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
     return build("drive", "v3", credentials=creds)
+
+def drive_get_meta(service, folder_id: str) -> dict:
+    """
+    Retourne les métadonnées du dossier (id, name, driveId...) pour savoir s'il
+    appartient à un Drive partagé. Nécessaire pour requêtes avec corpora/driveId.
+    """
+    return service.files().get(
+        fileId=folder_id,
+        fields="id,name,driveId,parents",
+        supportsAllDrives=True
+    ).execute()
 
 def drive_find_file(service, folder_id: str, name: str):
     drive_id = None
@@ -115,10 +143,17 @@ def drive_upload_excel(service, folder_id: str, name: str, binary_data: bytes, f
         raise RuntimeError("La création de nouveaux fichiers est désactivée.")
 
 # --- PATCH: helper central pour mettre à jour le fichier existant
-def update_excel_with_df(service, folder_id: str, ref_name: str, df: pd.DataFrame, add_timestamp_sheet: bool = False) -> str:
+
+from io import BytesIO
+from datetime import datetime
+from openpyxl import load_workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+
+def update_excel_with_df(service, folder_id: str, ref_name: str,
+                         df: pd.DataFrame, add_timestamp_sheet: bool = False) -> str:
     """
     Met à jour le fichier Excel existant sur Drive :
-    - Réécrit la feuille 'Données' avec df
+    - Réécrit/Crée la feuille 'Données' avec df
     - Optionnel : ajoute une feuille horodatée 'Sauvegarde_YYYYMMDD_HHMMSS'
     Retourne fileId.
     """
@@ -128,53 +163,62 @@ def update_excel_with_df(service, folder_id: str, ref_name: str, df: pd.DataFram
         raise FileNotFoundError(f"Fichier de référence introuvable: {ref_name}")
     file_id = found["id"]
 
-    # 2) Charger le classeur actuel
+    # 2) Charger le classeur actuel depuis Drive
     raw = drive_download_excel(service, file_id)
     wb = load_workbook(BytesIO(raw))
 
-    # 3) Décider si on supprime 'Données' ou si on la réécrit
+    # 3) Gestion de la feuille 'Données'
     has_donnees = ("Données" in wb.sheetnames)
     only_one_sheet = (len(wb.sheetnames) == 1)
 
-    # ⚠️ Ne jamais supprimer la dernière feuille visible
-    remove_donnees = has_donnees and not only_one_sheet
-    if remove_donnees:
-        wb.remove(wb["Données"])
+    # Si 'Données' existe et qu'il y a au moins une autre feuille → on la supprime (pour réécrire proprement)
+    if has_donnees and not only_one_sheet:
+        ws_old = wb["Données"]
+        wb.remove(ws_old)
 
-    # 4) Écrire les feuilles en préservant les autres
+    # Créer/obtenir la feuille 'Données'
+    if "Données" in wb.sheetnames:
+        ws = wb["Données"]
+        # Nettoyage intégral si c’était la seule feuille
+        if only_one_sheet and ws.max_row > 0:
+            ws.delete_rows(1, ws.max_row)
+    else:
+        ws = wb.create_sheet("Données")
+
+    # 4) Écrire le DataFrame dans 'Données'
+    # (en-têtes + lignes; pas d’index)
+    for r in dataframe_to_rows(df, index=False, header=True):
+        ws.append(r)
+
+    # 5) Optionnel : ajouter une feuille horodatée
+    if add_timestamp_sheet:
+        ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        while ts_name in wb.sheetnames:
+            ts_name += "_1"
+        ts_index = len(wb.sheetnames
+        ws_ts = wb.create_sheet(ts_name)
+        for r in dataframe_to_rows(df, index=False, header=True):
+            ws_ts.append(r)
+
+    # S’assurer qu’au moins une feuille est visible & active
+    ws.sheet_state = "visible"
+    try:
+        wb.active = wb.sheetnames.index("Données")
+    except Exception:
+        wb.active = 0  # fallback
+
+    # 6) Sauvegarde : sérialiser le classeur et mettre à jour le fichier sur Drive
     buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as w:
-        w.book = wb
-        w.sheets = {ws.title: ws for ws in wb.worksheets}
-
-        # Si 'Données' était la seule feuille, on la conserve et on nettoie son contenu
-        if has_donnees and only_one_sheet:
-            ws = w.book["Données"]
-            # Nettoyage simple : supprimer toutes les lignes existantes
-            if ws.max_row > 0:
-                ws.delete_rows(1, ws.max_row)
-
-        # Réécriture de 'Données'
-        df.to_excel(w, index=False, sheet_name="Données")
-
-        # Ajout horodaté (optionnel)
-        if add_timestamp_sheet:
-            ts_name = f"Sauvegarde_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            while ts_name in w.book.sheetnames:  # rare, mais on protège le nom
-                ts_name += "_1"
-            df.to_excel(w, index=False, sheet_name=ts_name)
-
-        # S'assurer qu'au moins une feuille est visible et active
-        w.book["Données"].sheet_state = "visible"
-        try:
-            w.book.active = w.book.sheetnames.index("Données")
-        except Exception:
-            w.book.active = 0  # fallback
-
+    wb.save(buffer)
     buffer.seek(0)
 
-    # 5) Mettre à jour le même fichier (files.update) — pas de création
-    new_id = drive_upload_excel(service, folder_id, ref_name, buffer.read(), file_id=file_id)
+    new_id = drive_upload_excel(
+        service=service,
+        folder_id=folder_id,
+        name=ref_name,
+        binary_data=buffer.read(),
+        file_id=file_id  # update in-place: pas de création
+    )
     return new_id
 
 # -------------------------------
@@ -207,7 +251,7 @@ st.sidebar.caption(f"Mode actuel : {'Admin ✅' if st.session_state['is_admin'] 
 # -------------------------------
 # Rendu conditionnel :
 # - mode public → formulaire (avec bouton de validation)
-# - mode admin  → bouton de déconnexion seulement
+# - mode admin → bouton de déconnexion seulement
 # -------------------------------
 if not st.session_state["is_admin"]:
     if not _admin_secret:
@@ -253,13 +297,13 @@ else:
 is_admin = st.session_state["is_admin"]
 
 
-# ---------- AUTO-SAUVEGARDE (5 min) ----------
+# ---------- AUTO-SAUVEGARDE (15 min) ----------
 # Timestamp d'exécution (stocké en session)
 if "autosave_last_ts" not in st.session_state:
     st.session_state["autosave_last_ts"] = datetime.now().timestamp()
 
 def _maybe_autosave():
-    """Sauvegarde silencieuse toutes les 5 minutes en mode admin (réécrit 'Données' uniquement)."""
+    """Sauvegarde silencieuse toutes les 15 minutes en mode admin (réécrit 'Données' uniquement)."""
     # ✅ On lit l'état depuis la session, pas de variable globale
     is_admin_local = bool(st.session_state.get("is_admin", False))
     if not is_admin_local:
@@ -272,18 +316,18 @@ def _maybe_autosave():
         return  # Drive non configuré
 
     now = datetime.now().timestamp()
-    # 5 minutes = 300s
-    if now - st.session_state["autosave_last_ts"] >= 300:
+    # 15 minutes = 900s
+    if now - st.session_state["autosave_last_ts"] >= 900:
         try:
             update_excel_with_df(service, folder_id, ref_name, st.session_state["df"], add_timestamp_sheet=False)
             st.session_state["autosave_last_ts"] = now
-            st.sidebar.success("💾 Auto-sauvegarde exécutée (5 min)")
+            st.sidebar.success("💾 Auto-sauvegarde exécutée (15 min)")
         except Exception as e:
             st.sidebar.error(f"Auto-sauvegarde: {e}")
 
 # Déclencheur front (si le composant est installé)
 if st_autorefresh is not None:
-    st_autorefresh(interval=5 * 60 * 1000, key="auto_refresh_5min")  # ~5 min
+    st_autorefresh(interval=15 * 60 * 1000, key="auto_refresh_5min")  # ~15 min
     _maybe_autosave()
 else:
     st.sidebar.info("Installe 'streamlit-autorefresh' (pip install streamlit-autorefresh) pour l’auto-sauvegarde.")
@@ -308,7 +352,7 @@ def load_excel(path_or_buffer):
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Colonnes attendues dans le fichier
-    required = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)"]
+    required = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "PROFILE"]
     for c in required:
         if c not in df.columns:
             st.error(f"⚠️ Colonne manquante dans Excel : '{c}'")
@@ -323,6 +367,8 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["RowProgress%"] = 0.0
     if "CompletedMass_Row" not in df.columns:
         df["CompletedMass_Row"] = 0.0
+    if "PROFILE" not in df.columns:
+        df["PROFILE"] = "Standard"
     return df
 
 
@@ -389,6 +435,20 @@ if "refresh_needed" not in st.session_state:
 if "dirty" not in st.session_state:
     st.session_state["dirty"] = False
 
+# --- ÉTAT DES FILTRES ACTIFS (utilisés par filter_view) ---
+if "filters" not in st.session_state:
+    df_all = st.session_state["df"]
+    st.session_state["filters"] = {
+        "phase":   sorted(df_all["PHASE"].unique()),
+        "step":    STEPS_ORDER + ["None"],
+        "profile": sorted(df_all["PROFILE"].fillna("Non défini").unique()),
+        "search":  "",
+        "mass":    (
+            float(df_all["TOT MASS (Kg)"].min()),
+            float(df_all["TOT MASS (Kg)"].max())
+        ),
+        "sort":    "PHASE ↑",
+    }
 
 # -------------------------------------------------
 # 2) Fonctions utilitaires (TOR & calculs)
@@ -396,24 +456,45 @@ if "dirty" not in st.session_state:
 def recompute_progress(df: pd.DataFrame) -> pd.DataFrame:
     """Recalcule RowProgress% (pondéré par Étape) et CompletedMass_Row (masse × RowProgress%)."""
     out = df.copy()
-    out["RowProgress%"] = out["Etape"].map(PROGRESS_MAP).fillna(0.0)
-    out["CompletedMass_Row"] = out["TOT MASS (Kg)"] * out["RowProgress%"]
-    return out
 
+    # 1) Masses : s'assurer d'un float
+    out["TOT MASS (Kg)"] = pd.to_numeric(out["TOT MASS (Kg)"], errors="coerce").astype(float).fillna(0.0)
+
+    # 2) Etape -> RowProgress% : caster avant map pour éviter les pièges 'category'
+    #    (si 'Etape' est catégorielle, on passe par object/str ; retour en float64)
+    rp = out["Etape"].astype(object).map(PROGRESS_MAP)
+    out["RowProgress%"] = pd.to_numeric(rp, errors="coerce").astype(float).fillna(0.0)
+
+    # 3) Produit vectorisé en numpy float (évite toute interférence de dtype category)
+    out["CompletedMass_Row"] = (
+        out["TOT MASS (Kg)"].to_numpy(dtype=float) * out["RowProgress%"].to_numpy(dtype=float)
+    )
+
+    return out
 
 @st.cache_data(show_spinner=False)
 def step_advancement(df: pd.DataFrame) -> pd.DataFrame:
-    """Avancement par étape TOR."""
-    total_mass = df["TOT MASS (Kg)"].sum()
+    """Avancement par étape TOR — calcule la masse traitée au moins jusqu'à chaque étape."""
+    total_mass = pd.to_numeric(df["TOT MASS (Kg)"], errors="coerce").fillna(0.0).sum()
+
+    # Série de rangs numériques (int) quelle que soit la nature ddf["Etape"]
+    ranks = (
+        df["Etape"]
+        .astype(object)                 # évite les comportements catégoriels
+        .map(STEP_RANK)                 # map -> codes TOR
+        .fillna(-1)
+        .astype(int)                    # force dtype int pour la comparaison
+    )
+
     rows = []
     for step in STEPS_ORDER:
-        treated_mass = df.loc[
-            df["Etape"].map(lambda s: STEP_RANK.get(s, -1)) >= STEP_RANK[step],
-            "TOT MASS (Kg)"
-        ].sum()
+        # Comparaison purement numérique (int >= int) → pas d'erreur categorical
+        treated_mass = df.loc[ranks >= STEP_RANK[step], "TOT MASS (Kg)"].sum()
         pct = (treated_mass / total_mass) * 100 if total_mass > 0 else 0.0
         rows.append({"Etape": step, "CompletedMass": treated_mass, "Avancement%": pct})
+
     return pd.DataFrame(rows)
+
 
 
 @st.cache_data(show_spinner=False)
@@ -427,14 +508,79 @@ def phase_advancement(df: pd.DataFrame) -> pd.DataFrame:
         rows.append({"PHASE": phase, "CompletedMass": treated_mass, "Avancement%": pct})
     return pd.DataFrame(rows)
 
+# --- Anti-régression TOR : empêcher de repasser à une étape antérieure ---
+def enforce_monotonic_tor(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # Crée une colonne technique mémorisant le rang le plus élevé déjà atteint
+    if "Etape_Last" not in out.columns:
+        out["Etape_Last"] = out["Etape"].map(STEP_RANK).fillna(-1)
+
+    # Rangs courant vs dernier rang atteint
+    r_now  = out["Etape"].map(STEP_RANK).fillna(-1)
+    r_last = out["Etape_Last"].fillna(-1)
+
+    # Pas de régression : on force à max(r_now, r_last)
+    r_no_reg = r_now.where(r_now >= r_last, r_last)
+
+    inv_rank = {v: k for k, v in STEP_RANK.items()}
+    out["Etape"] = r_no_reg.map(inv_rank).fillna("None")
+    out["Etape_Last"] = out["Etape"].map(STEP_RANK).fillna(-1)
+
+    return out
+
+
+# --- Historique en session ---
+def init_history():
+    if "history" not in st.session_state:
+        st.session_state["history"] = []
+    if "future" not in st.session_state:
+        st.session_state["future"] = []
 
 # Première recomputation
 st.session_state["df"] = recompute_progress(st.session_state["df"])
 
+# Initialisation de l’historique au chargement
+init_history()
+
+def push_history(df: pd.DataFrame):
+    # On enregistre une copie légère
+    st.session_state["history"].append(df.copy())
+    # Une nouvelle action invalide la pile 'future'
+    st.session_state["future"].clear()
+    # (Option) éviter une pile trop grande :
+    MAX_HIST = 10
+    if len(st.session_state["history"]) > MAX_HIST:
+        st.session_state["history"] = st.session_state["history"][-MAX_HIST:]
+
+def undo():
+    if st.session_state.get("history"):
+        # L'état courant part dans 'future'
+        st.session_state["future"].append(st.session_state["df"].copy())
+        st.session_state["df"] = st.session_state["history"].pop()
+        st.session_state["dirty"] = True
+        try:
+            step_advancement.clear()
+            phase_advancement.clear()
+        except Exception:
+            pass
+        st.success("↩️ Annulé (Undo)")
+
+def redo():
+    if st.session_state.get("future"):
+        st.session_state["history"].append(st.session_state["df"].copy())
+        st.session_state["df"] = st.session_state["future"].pop()
+        st.session_state["dirty"] = True
+        try:
+            step_advancement.clear()
+            phase_advancement.clear()
+        except Exception:
+            pass
+        st.success("↪️ Rétabli (Redo)")
+
 # -------------------------------------------------
 # 3) Onglets principaux
 # -------------------------------------------------
-
 if is_admin:
     tab_edit, tab_kpi, tab_graph, tab_export = st.tabs(["✏️ Édition", "📈 KPI", "📊 Graphiques", "📤 Export"])
 else:
@@ -443,84 +589,223 @@ else:
 # -------------------------------------------------
 # ✏️ 3.1 Édition
 # -------------------------------------------------
-
 if is_admin:
     with tab_edit:
         st.subheader("Mise à jour des Étapes (TOR) — par pièce")
 
-        phases = sorted(st.session_state["df"]["PHASE"].unique())
-        ph_sel = st.multiselect("Filtrer par PHASE", options=phases, default=phases)
+        # # --- Contrôles UX avancés (ajoute PROFILE) ---
+        # phases = sorted(st.session_state["df"]["PHASE"].unique())
+        # steps = STEPS_ORDER + ["None"]
+        # profiles = sorted(st.session_state["df"]["PROFILE"].fillna("Non défini").unique())
 
-        search_asm = st.text_input("🔍 Rechercher Assemblage / Pièce (contient)", value="")
+        # --- FORMULAIRE DE FILTRES (validation en une fois) ---
+        with st.form("filters_form", clear_on_submit=False, enter_to_submit=True):
+            df_all = st.session_state["df"]
+            phases = sorted(df_all["PHASE"].unique())
+            steps = STEPS_ORDER + ["None"]
+            profiles = sorted(df_all["PROFILE"].fillna("Non défini").unique())
+            m_min = float(df_all["TOT MASS (Kg)"].min())
+            m_max = float(df_all["TOT MASS (Kg)"].max())
 
-        # ---- Filtrage (corrigé, voir section B.1 ci-dessous) ----
+            # Valeurs initiales = filtres actifs
+            f = st.session_state["filters"]
+
+            ph_sel = st.multiselect("Filtrer par PHASE", options=phases, default=f["phase"], key="pending_filter_phase")
+            # ✅ Nouveau : case à cocher "Afficher toutes les PHASES"
+            show_all_phases_default = (set(f["phase"]) == set(phases))
+            show_all_phases = st.checkbox(
+                "Afficher toutes les PHASES",
+                value=show_all_phases_default,
+                key="pending_filter_phase_all",
+                help="Cochez pour ignorer la sélection ci‑dessus et afficher toutes les phases."
+            )
+            step_sel = st.multiselect("Filtrer par Étape", options=steps, default=f["step"], key="pending_filter_step")
+            prof_sel = st.multiselect("Filtrer par PROFILE", options=profiles, default=f["profile"],
+                                      key="pending_filter_profile")
+            # ✅ Nouveau : case à cocher "Afficher tous les PROFILE"
+            show_all_default = (set(f["profile"]) == set(profiles))
+            show_all_profiles = st.checkbox(
+                "Afficher tous les PROFILE",
+                value=show_all_default,
+                key="pending_filter_profile_all",
+                help="Cochez pour ignorer la sélection ci‑dessous et afficher tous les profils."
+            )
+
+            search_q = st.text_input("🔍 Rechercher Assemblage / Pièce (contient)", value=f["search"],
+                                     key="pending_filter_search")
+            mass_min, mass_max = st.slider(
+                "Filtrer par masse (Kg)",
+                min_value=m_min, max_value=m_max,
+                value=(max(m_min, f["mass"][0]), min(m_max, f["mass"][1])),
+                step=0.1,
+                key="pending_filter_mass",
+            )
+            sort_by = st.selectbox(
+                "Trier par",
+                options=[
+                    "PHASE ↑", "PHASE ↓",
+                    "Étape (rang) ↑", "Étape (rang) ↓",
+                    "Masse (Kg) ↑", "Masse (Kg) ↓",
+                    "PART NO. ↑", "PART NO. ↓",
+                    "ASSEMBLY NO. ↑", "ASSEMBLY NO. ↓",
+                ],
+                index=0 if f["sort"] not in [
+                    "PHASE ↑", "PHASE ↓", "Étape (rang) ↑", "Étape (rang) ↓", "Masse (Kg) ↑", "Masse (Kg) ↓",
+                    "PART NO. ↑", "PART NO. ↓", "ASSEMBLY NO. ↑", "ASSEMBLY NO. ↓"
+                ] else ["PHASE ↑", "PHASE ↓", "Étape (rang) ↑", "Étape (rang) ↓", "Masse (Kg) ↑", "Masse (Kg) ↓",
+                        "PART NO. ↑", "PART NO. ↓", "ASSEMBLY NO. ↑", "ASSEMBLY NO. ↓"].index(f["sort"]),
+                key="pending_filter_sort",
+            )
+
+            c_a, c_b = st.columns([1, 1])
+            apply_filters = c_a.form_submit_button("✅ Appliquer les filtres", type="primary")
+            reset_filters = c_b.form_submit_button("↺ Réinitialiser")
+
+        # --- Application des filtres au clic (met à jour les "filtres actifs") ---
+        if apply_filters:
+            st.session_state["filters"] = {
+                "phase":   phases  if show_all_phases   else (ph_sel   or phases),
+                "step": step_sel or steps,
+                "profile": profiles if show_all_profiles else (prof_sel or profiles),
+                "search": (search_q or "").strip(),
+                "mass": (mass_min, mass_max),
+                "sort": sort_by,
+            }
+            st.success("✅ Filtres appliqués")
+
+        if reset_filters:
+            st.session_state["filters"] = {
+                "phase": phases,
+                "step": steps,
+                "profile": profiles,
+                "search": "",
+                "mass": (m_min, m_max),
+                "sort": "PHASE ↑",
+            }
+            st.info("↺ Filtres réinitialisés")
+
+
+        # --- Filtrage vectorisé ---
         def filter_view(_df: pd.DataFrame) -> pd.DataFrame:
-            _view = _df[_df["PHASE"].isin(ph_sel)]
-            if search_asm.strip():
-                pat = search_asm.strip().lower()
+            f = st.session_state["filters"]
+
+            _view = _df[
+                (_df["PHASE"].isin(f["phase"])) &
+                (_df["Etape"].isin(f["step"])) &
+                (_df["PROFILE"].fillna("Non défini").isin(f["profile"])) &
+                (_df["TOT MASS (Kg)"].between(f["mass"][0], f["mass"][1]))
+                ]
+
+            if f["search"]:
+                pat = f["search"].lower()
                 mask = (
-                    _view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
-                    |  # <- OR logique corrigé
-                    _view["PART NO."].astype(str).str.lower().str.contains(pat, na=False)
+                        _view["ASSEMBLY NO."].astype(str).str.lower().str.contains(pat, na=False)
+                        |
+                        _view["PART NO."].astype(str).str.lower().str.contains(pat, na=False)
                 )
                 _view = _view[mask]
+
+            # Tri
+            sort_by = f["sort"]
+            if "Étape (rang)" in sort_by:
+                rank = _view["Etape"].map(STEP_RANK).fillna(-1)
+                asc = "↑" in sort_by
+                _view = _view.assign(_rank=rank).sort_values("_rank", ascending=asc).drop(columns="_rank")
+            elif "Masse (Kg)" in sort_by:
+                asc = "↑" in sort_by
+                _view = _view.sort_values("TOT MASS (Kg)", ascending=asc)
+            elif "PHASE" in sort_by:
+                asc = "↑" in sort_by
+                _view = _view.sort_values("PHASE", ascending=asc)
+            elif "PART NO." in sort_by:
+                asc = "↑" in sort_by
+                _view = _view.sort_values("PART NO.", ascending=asc)
+            elif "ASSEMBLY NO." in sort_by:
+                asc = "↑" in sort_by
+                _view = _view.sort_values("ASSEMBLY NO.", ascending=asc)
+
             return _view
 
-        st.markdown("**Éditer l’étape par pièce** (application automatique)")
+
+        st.markdown("**Éditer l’étape par pièce** (validation manuelle)")
 
         view_items = filter_view(st.session_state["df"])
-        edit_cols = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "Etape"]
+        edit_cols  = ["PHASE", "ASSEMBLY NO.", "PART NO.", "TOT MASS (Kg)", "PROFILE", "Etape"]
         df_edit_items = view_items[edit_cols].copy()
 
-        updated_items = st.data_editor(
-            df_edit_items,
-            key="edit_items",
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "PHASE": st.column_config.TextColumn("PHASE", disabled=True),
-                "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
-                "PART NO.": st.column_config.TextColumn("PART NO.", disabled=True),
-                "TOT MASS (Kg)": st.column_config.NumberColumn("TOT MASS (Kg)", disabled=True),
-                "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
-            },
-        )
+        # ✅ 'Etape' éditable → éviter category pendant l'édition
+        if "Etape" in df_edit_items.columns:
+            df_edit_items["Etape"] = df_edit_items["Etape"].astype(str)
 
-        # ---- Application immédiate (corrigée, voir section B.2) ----
-        try:
-            key_cols = ["ASSEMBLY NO.", "PART NO."]
-            needed = key_cols + ["Etape"]
-            if all(c in updated_items.columns for c in needed):
-                updated_map = (
-                    updated_items[needed]
-                    .drop_duplicates()
-                    .assign(Etape=lambda s: s["Etape"].fillna("None"))
-                )
+        with st.form("edit_items_form", clear_on_submit=False):
+            updated_items = st.data_editor(
+                df_edit_items,
+                key="edit_items",
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "PHASE": st.column_config.TextColumn("PHASE", disabled=True, help="Phase d'appartenance"),
+                    "ASSEMBLY NO.": st.column_config.TextColumn("ASSEMBLY NO.", disabled=True),
+                    "PART NO.": st.column_config.TextColumn("PART NO.", disabled=True),
+                    "TOT MASS (Kg)": st.column_config.NumberColumn("TOT MASS (Kg)", disabled=True, help="Masse de la pièce"),
+                    "PROFILE": st.column_config.TextColumn("PROFILE", disabled=True),
+                    "Etape": st.column_config.SelectboxColumn(options=STEPS_ORDER + ["None"], required=True),
+                },
+            )
 
-                df_base = st.session_state["df"].copy()
-                merged = df_base.merge(updated_map, on=key_cols, how="left", suffixes=("", "_new"))
-                merged["Etape"] = merged["Etape_new"].combine_first(merged["Etape"]).fillna("None")
-                merged = merged.drop(columns=["Etape_new"])
+            c1, c2 = st.columns([1, 1])
+            valider = c1.form_submit_button("✅ Valider les modifications", type="primary")
+            annuler = c2.form_submit_button("↩️ Annuler (réinitialiser le tableau)")
 
-                # Anti-régression (optionnel) appliqué juste après — voir B.3
-                if st.session_state.get("anti_reg", True):
-                    merged = enforce_monotonic_tor(merged)  # défini en B.3
+        # 3) Bouton Annuler : on ignore les edits et on relit la source
+        if annuler:
+            st.info("Modifications annulées.")
+            st.rerun()
 
-                st.session_state["df"] = recompute_progress(merged)
-                st.session_state["dirty"] = True
+        # 4) Bouton Valider : on applique en UNE FOIS (merge + recompute + invalidation caches)
+        if valider:
+        # --- Application immédiate robuste + Undo + Anti-régression ---
+            try:
+                key_cols = ["ASSEMBLY NO.", "PART NO."]
+                needed   = key_cols + ["Etape"]
+                if all(c in updated_items.columns for c in needed):
+                    updated_map = (
+                        updated_items[needed]
+                        .drop_duplicates()
+                        .assign(Etape=lambda s: s["Etape"].fillna("None"))
+                    )
 
-                # Invalidation de caches nécessaires
-                try:
-                    step_advancement.clear()
-                    phase_advancement.clear()
-                except Exception:
-                    pass
+                    # Historique (Undo)
+                    push_history(st.session_state["df"])
 
-                st.success("✅ Modifications (pièces) appliquées")
-            else:
-                st.info("ℹ️ Colonnes requises absentes (ASSEMBLY NO., PART NO., Etape) dans l’éditeur.")
-        except Exception as e:
-            st.error(f"❌ Erreur pendant l’application des modifications (pièces) : {e}")
+                    df_base = st.session_state["df"].copy()
+                    merged  = df_base.merge(updated_map, on=key_cols, how="left", suffixes=("", "_new"))
+                    merged["Etape"] = merged["Etape_new"].combine_first(merged["Etape"]).fillna("None")
+                    merged = merged.drop(columns=["Etape_new"])
+
+                    # Anti-régression (si activé)
+                    if st.session_state.get("anti_reg", False):
+                        merged = enforce_monotonic_tor(merged)
+
+                    # Dtypes & recompute
+                    for col, dtype in DTYPE_CONFIG.items():
+                        if col in merged.columns:
+                            merged[col] = merged[col].astype(dtype)
+
+                    st.session_state["df"] = recompute_progress(merged)
+                    st.session_state["dirty"] = True
+
+                    try:
+                        step_advancement.clear()
+                        phase_advancement.clear()
+                    except Exception:
+                        pass
+
+                    st.success("✅ Modifications (pièces) appliquées")
+                else:
+                    st.info("ℹ️ Colonnes requises absentes (ASSEMBLY NO., PART NO., Etape) dans l’éditeur.")
+            except Exception as e:
+                st.error(f"❌ Erreur pendant l’application des modifications (pièces) : {e}")
 
 # -------------------------------------------------
 # 📈 3.2 KPI
@@ -535,7 +820,11 @@ with tab_kpi:
     k2.metric("Masse Terminée (Kg)", f"{completed_global_mass:,.2f}")
     k3.metric("Avancement Global", f"{progress_global:.2f}%")
 
-    gauge_color = "green" if progress_global >= 80 else ("orange" if progress_global >= 50 else "red")
+    gauge_color = (
+        NEOMECA_PALETTE["success"] if progress_global >= 80
+        else NEOMECA_PALETTE["warning"] if progress_global >= 50
+        else NEOMECA_PALETTE["danger"]
+    )
     fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number",
         value=progress_global,
@@ -550,6 +839,7 @@ with tab_kpi:
             ]
         }
     ))
+
     st.plotly_chart(fig_gauge, use_container_width=True)
     st.divider()
     st.subheader("Avancement par Étape (TOR)")
@@ -595,6 +885,42 @@ with tab_kpi:
     fig_bar_phase.update_traces(texttemplate="%{text:.2f}%", textposition="outside")
     fig_bar_phase.update_yaxes(title="%", range=[0, 100])
     st.plotly_chart(fig_bar_phase, use_container_width=True)
+
+    #Répartition masse par PHASE (camembert)
+    st.subheader("Répartition de la masse par PHASE")
+    df_phase_mass = st.session_state["df"].groupby("PHASE")["TOT MASS (Kg)"].sum().reset_index()
+    fig_pie = px.pie(
+        df_phase_mass, names="PHASE", values="TOT MASS (Kg)",
+        color="PHASE", title="Masse totale par PHASE",
+    )
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+    #Top assemblages par masse (utile pour prioriser)
+    st.subheader("Top 10 Assemblages par masse")
+    df_top_asm = (st.session_state["df"]
+                  .groupby("ASSEMBLY NO.")["TOT MASS (Kg)"].sum()
+                  .sort_values(ascending=False).head(10).reset_index())
+    fig_top_asm = px.bar(
+        df_top_asm, x="ASSEMBLY NO.", y="TOT MASS (Kg)",
+        title="Top 10 Assemblages (Kg)",
+        color="TOT MASS (Kg)"
+    )
+    fig_top_asm.update_layout(xaxis_title="ASSEMBLY NO.", yaxis_title="Masse (Kg)")
+    st.plotly_chart(fig_top_asm, use_container_width=True)
+
+    #Heatmap PHASE × Étape(masse)
+    st.subheader("Heatmap — Masse par PHASE × Étape")
+    df_heat = (st.session_state["df"]
+               .groupby(["PHASE", "Etape"])["TOT MASS (Kg)"].sum()
+               .reset_index())
+    pivot = df_heat.pivot(index="PHASE", columns="Etape", values="TOT MASS (Kg)").fillna(0)
+    fig_heat = px.imshow(
+        pivot,
+        labels=dict(x="Étape", y="PHASE", color="Masse (Kg)"),
+        color_continuous_scale="Blues",
+        aspect="auto",
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
 
 # -------------------------------------------------
 # 📊 3.3 Graphiques
