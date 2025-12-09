@@ -399,7 +399,7 @@ try:
         found = drive_find_file(service, folder_id, ref_name)
         if found:
             raw = drive_download_excel(service, found["id"])
-            df_loaded = pd.read_excel(BytesIO(raw), engine="openpyxl")
+            df_loaded = pd.read_excel(BytesIO(raw), engine="openpyxl",  sheet_name="Données")
             source_label = f"Fichier Drive : {ref_name}"
             current_source_key = f"drive::{found['id']}"
         else:
@@ -987,3 +987,4 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
