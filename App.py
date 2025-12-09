@@ -441,7 +441,7 @@ if "filters" not in st.session_state:
     st.session_state["filters"] = {
         "phase":   sorted(df_all["PHASE"].unique()),
         "step":    STEPS_ORDER + ["None"],
-        "profile": sorted(df_all["PROFILE"].fillna("Non défini").unique()),
+        "profile": [],
         "search":  "",
         "mass":    (
             float(df_all["TOT MASS (Kg)"].min()),
@@ -666,7 +666,7 @@ if is_admin:
             st.session_state["filters"] = {
                 "phase":   phases  if show_all_phases   else (ph_sel   or phases),
                 "step": step_sel or steps,
-                "profile": profiles if show_all_profiles else (prof_sel or profiles),
+                "profile": profiles if show_all_profiles else (prof_sel or []),
                 "search": (search_q or "").strip(),
                 "mass": (mass_min, mass_max),
                 "sort": sort_by,
@@ -987,4 +987,5 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
