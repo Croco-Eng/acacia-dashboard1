@@ -28,8 +28,8 @@ st.title("📊 Tableau de Bord — Suivi Fabrication Structure Métallique")
 STEP_COLORS = {
     "Préparation": "#1f77b4",  # bleu
     "Assemblage": "#ff7f0e",  # orange
-    "Traitement de surface": "#2ca02c",  # vert
-    "Finalisation": "#d62728",  # rouge
+    "Soudure": "#2ca02c",  # vert
+    "Traitement de surface": "#d62728",  # rouge
     "None": "#7f7f7f"
 }
 
@@ -51,13 +51,13 @@ DTYPE_CONFIG = {
 }
 
 # Étapes et pondérations (pour RowProgress% global)
-STEPS_ORDER = ["Préparation", "Assemblage", "Traitement de surface", "Finalisation"]
+STEPS_ORDER = ["Préparation", "Assemblage", "Soudure", "Traitement de surface"]
 STEP_RANK = {s: i for i, s in enumerate(STEPS_ORDER)}  # ordre pour logique TOR
 PROGRESS_MAP = {
     "Préparation": 0.25,
     "Assemblage": 0.60,
-    "Traitement de surface": 0.85,
-    "Finalisation": 1.00,
+    "Soudure": 0.85,
+    "Traitement de surface": 1.00,
     "None": 0.00
 }
 
@@ -316,8 +316,8 @@ def _maybe_autosave():
         return  # Drive non configuré
 
     now = datetime.now().timestamp()
-    # 15 minutes = 900s
-    if now - st.session_state["autosave_last_ts"] >= 900:
+    # 60 minutes = 3600s
+    if now - st.session_state["autosave_last_ts"] >= 3600:
         try:
             update_excel_with_df(service, folder_id, ref_name, st.session_state["df"], add_timestamp_sheet=False)
             st.session_state["autosave_last_ts"] = now
@@ -361,8 +361,21 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["PHASE"] = df["PHASE"].astype(str)
     df["TOT MASS (Kg)"] = pd.to_numeric(df["TOT MASS (Kg)"], errors="coerce").fillna(0.0)
     # Colonnes d'application (si absentes)
+
     if "Etape" not in df.columns:
         df["Etape"] = "None"
+    else:
+        df["Etape"] = (
+            df["Etape"]
+            .astype(object)  # éviter les pièges 'category'
+            .where(df["Etape"].notna(), "None")  # NaN -> "None"
+            .astype(str).str.strip()  # enlever espaces
+            .replace("", "None")  # chaîne vide -> "None"
+        )
+        # Limiter aux valeurs autorisées
+        allowed_steps = set(STEPS_ORDER + ["None"])
+        df.loc[~df["Etape"].isin(allowed_steps), "Etape"] = "None"
+
     if "RowProgress%" not in df.columns:
         df["RowProgress%"] = 0.0
     if "CompletedMass_Row" not in df.columns:
@@ -441,7 +454,7 @@ if "filters" not in st.session_state:
     st.session_state["filters"] = {
         "phase":   sorted(df_all["PHASE"].unique()),
         "step":    STEPS_ORDER + ["None"],
-        "profile": [],
+        "profile": [], #sorted(df_all["PROFILE"].fillna("Non défini").unique()),
         "search":  "",
         "mass":    (
             float(df_all["TOT MASS (Kg)"].min()),
@@ -689,6 +702,9 @@ if is_admin:
         def filter_view(_df: pd.DataFrame) -> pd.DataFrame:
             f = st.session_state["filters"]
 
+            etape_clean = _df["Etape"].astype(str).str.strip().replace("", "None")
+            mask_step = etape_clean.isin(f["step"])
+
             _view = _df[
                 (_df["PHASE"].isin(f["phase"])) &
                 (_df["Etape"].isin(f["step"])) &
@@ -735,7 +751,14 @@ if is_admin:
 
         # ✅ 'Etape' éditable → éviter category pendant l'édition
         if "Etape" in df_edit_items.columns:
-            df_edit_items["Etape"] = df_edit_items["Etape"].astype(str)
+            df_edit_items["Etape"] = (
+                df_edit_items["Etape"]
+                .astype(object)
+                .where(df_edit_items["Etape"].notna(), "None")
+                .astype(str).str.strip()
+                .replace("", "None")
+            )
+
 
         with st.form("edit_items_form", clear_on_submit=False):
             updated_items = st.data_editor(
@@ -910,16 +933,41 @@ with tab_kpi:
 
     #Heatmap PHASE × Étape(masse)
     st.subheader("Heatmap — Masse par PHASE × Étape")
-    df_heat = (st.session_state["df"]
-               .groupby(["PHASE", "Etape"])["TOT MASS (Kg)"].sum()
-               .reset_index())
-    pivot = df_heat.pivot(index="PHASE", columns="Etape", values="TOT MASS (Kg)").fillna(0)
+    df_heat = (
+        st.session_state["df"]
+        .groupby(["PHASE", "Etape"])["TOT MASS (Kg)"]
+        .sum()
+        .reset_index()
+    )
+
+    pivot = (
+        df_heat
+        .pivot(index="PHASE", columns="Etape", values="TOT MASS (Kg)")
+        .fillna(0)
+    )
+
+    # Ordonner les colonnes (TOR + "None")
+    ordered_steps = STEPS_ORDER + ["None"]
+    existing_steps = [s for s in ordered_steps if s in pivot.columns]
+    pivot = pivot.reindex(columns=existing_steps)
+
+    # Heatmap
     fig_heat = px.imshow(
         pivot,
-        labels=dict(x="Étape", y="PHASE", color="Masse (Kg)"),
+        labels=dict(x="Étape (TOR)", y="PHASE", color="Masse (Kg)"),
         color_continuous_scale="Blues",
         aspect="auto",
     )
+
+    # ✅ Forcer axes en catégoriel (affiche les libellés)
+    fig_heat.update_xaxes(type="category")
+    fig_heat.update_yaxes(type="category")
+
+    fig_heat.update_traces(
+        hovertemplate="PHASE=%{y}<br>Étape=%{x}<br>Masse=%{z:.2f} kg<extra></extra>"
+    )
+    fig_heat.update_coloraxes(colorbar_title="Kg")
+
     st.plotly_chart(fig_heat, width='stretch')
 
 # -------------------------------------------------
@@ -987,5 +1035,3 @@ if is_admin:
                 file_name=f"Suivi_Fabrication_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-
